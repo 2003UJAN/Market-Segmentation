@@ -1,5 +1,12 @@
 # streamlit_app.py
 
+import sys
+import os
+
+# Add project ROOT directory to Python path
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(ROOT_DIR)
+
 import streamlit as st
 import pandas as pd
 import joblib
