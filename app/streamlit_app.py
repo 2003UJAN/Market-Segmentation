@@ -1,155 +1,106 @@
-# streamlit_app.py
-
-import sys
-import os
-
-# Add project ROOT directory to Python path
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(ROOT_DIR)
-
 import streamlit as st
 import pandas as pd
-import joblib
-import os
+from src.segmentation_pipeline import train_pipeline, load_trained_model
 
-from src.data_generation import create_synthetic_dataset
-from src.segmentation_pipeline import (
-    train_pipeline,
-    load_pipeline,
-    predict_segments,
-    profile_clusters,
-)
-from src.utils import plot_pca_scatter
+MODEL_PATH = "models/segmentation_model.pkl"
 
-DATA_PATH = "data/synthetic_consumer_survey.csv"
-MODEL_PATH = "models/segmentation_pipeline.joblib"
-
+# -------------------------------------------------------
+# PAGE CONFIG
+# -------------------------------------------------------
 st.set_page_config(
-    page_title="Market Segmentation Dashboard",
+    page_title="Customer Segmentation",
     layout="wide",
 )
 
+# -------------------------------------------------------
+# CUSTOM CSS FOR SLEEK UI
+# -------------------------------------------------------
+st.markdown("""
+<style>
+/* Smooth rounded components */
+div.stButton > button {
+    border-radius: 8px;
+    padding: 0.6rem 1.2rem;
+    font-size: 16px;
+}
 
-# -------------------------------------------------------------------
-# Sidebar
-# -------------------------------------------------------------------
-st.sidebar.title("⚙️ Controls")
+/* Card-style containers */
+.block-container {
+    padding-top: 2rem;
+}
 
-action = st.sidebar.radio(
-    "Select Action",
-    ["View Dataset", "Train Model", "Cluster Visualization", "Predict Segment"],
-)
+.metric-card {
+    background: rgba(240,240,240,0.65);
+    padding: 1.3rem;
+    border-radius: 12px;
+    margin-bottom: 1rem;
+}
+
+/* Dark mode friendly */
+@media (prefers-color-scheme: dark) {
+    .metric-card {
+        background: rgba(20,20,20,0.4);
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
+# -------------------------------------------------------
+# HEADER
+# -------------------------------------------------------
+st.title("✨ Customer Segmentation Dashboard")
+st.write("Upload data, train a segmentation model, and explore the customer clusters.")
+
+# -------------------------------------------------------
+# SIDEBAR
+# -------------------------------------------------------
+st.sidebar.header("⚙️ Model Configuration")
+
+k_val = st.sidebar.slider("Number of Clusters (k)", min_value=2, max_value=10, value=4)
+pca_val = st.sidebar.slider("PCA Components", min_value=2, max_value=10, value=5)
 
 st.sidebar.markdown("---")
-st.sidebar.info("Hansa Research – Consumer Insights & Segmentation Demo")
+uploaded_file = st.sidebar.file_uploader("📤 Upload CSV Dataset", type=["csv"])
 
+train_btn = st.sidebar.button("🚀 Train Segmentation Model", use_container_width=True)
 
-# -------------------------------------------------------------------
-# Load Dataset
-# -------------------------------------------------------------------
-@st.cache_data
-def load_dataset():
-    if os.path.exists(DATA_PATH):
-        return pd.read_csv(DATA_PATH)
-    else:
-        df = create_synthetic_dataset(2000)
-        df.to_csv(DATA_PATH, index=False)
-        return df
+# -------------------------------------------------------
+# MAIN AREA
+# -------------------------------------------------------
+if uploaded_file is not None:
+    df = pd.read_csv(uploaded_file)
+    st.subheader("📊 Preview of Uploaded Data")
+    st.dataframe(df.head())
 
+    if train_btn:
+        with st.spinner("⏳ Training model… please wait"):
+            try:
+                model = train_pipeline(df, k=k_val, n_pca=pca_val, save_path=MODEL_PATH)
+                st.success("🎉 Model trained and saved successfully!")
+            except Exception as e:
+                st.error(f"Model training failed: {e}")
 
-df = load_dataset()
+    # Load model section
+    st.markdown("---")
+    st.subheader("🔍 Predict Segments")
 
-
-# -------------------------------------------------------------------
-# Load Model
-# -------------------------------------------------------------------
-def get_model():
-    if os.path.exists(MODEL_PATH):
-        return load_pipeline(MODEL_PATH)
-    else:
-        st.warning("Model not found. Please train model first.")
-        return None
-
-
-# -------------------------------------------------------------------
-# PAGE 1: View Dataset
-# -------------------------------------------------------------------
-if action == "View Dataset":
-    st.title("📊 Synthetic Consumer Survey Dataset")
-
-    st.write("This dataset is auto-generated for segmentation analysis.")
-    st.dataframe(df.head(20))
-
-    st.success(f"Dataset Loaded: {df.shape[0]} rows × {df.shape[1]} columns")
-
-    st.download_button(
-        "📥 Download Dataset",
-        data=df.to_csv(index=False),
-        file_name="synthetic_consumer_survey.csv",
-        mime="text/csv"
-    )
-
-
-# -------------------------------------------------------------------
-# PAGE 2: Train Model
-# -------------------------------------------------------------------
-elif action == "Train Model":
-    st.title("🤖 Train Segmentation Model")
-
-    k_val = st.slider("Number of Segments (K-Means)", 3, 7, 4)
-    pca_val = st.slider("PCA Components", 2, 3, 2)
-
-    if st.button("🚀 Train Model"):
-        model = train_pipeline(df, k=k_val, n_pca=pca_val, save_path=MODEL_PATH)
-        st.success("Model trained and saved successfully!")
-        st.code(f"Saved at: {MODEL_PATH}")
-
-    st.info("Training uses PCA + KMeans + preprocessing pipeline.")
-
-
-# -------------------------------------------------------------------
-# PAGE 3: Cluster Visualization
-# -------------------------------------------------------------------
-elif action == "Cluster Visualization":
-    st.title("🎯 Cluster Visualization & Profiles")
-
-    model = get_model()
+    model = load_trained_model(MODEL_PATH)
     if model is None:
-        st.stop()
+        st.info("Upload data and train the model to enable predictions.")
+    else:
+        st.success("Model loaded successfully.")
+        if st.button("Generate Customer Segments", use_container_width=True):
+            preds = model.predict(df)
+            df["Segment"] = preds
 
-    st.subheader("📌 PCA Scatter Plot (PC1 vs PC2)")
-    result = predict_segments(df, model)
+            st.dataframe(df)
 
-    plt = plot_pca_scatter(result)
-    st.pyplot(plt)
-
-    st.subheader("📊 Cluster Profiles")
-    profile = profile_clusters(df, model)
-    st.dataframe(profile)
-
-
-# -------------------------------------------------------------------
-# PAGE 4: Predict Segment for New Data
-# -------------------------------------------------------------------
-elif action == "Predict Segment":
-    st.title("🔮 Predict Segment for New Consumers")
-
-    model = get_model()
-    if model is None:
-        st.stop()
-
-    uploaded = st.file_uploader("Upload CSV (same columns as training data)", type="csv")
-
-    if uploaded:
-        new_df = pd.read_csv(uploaded)
-        pred = predict_segments(new_df, model)
-
-        st.success("Prediction Complete!")
-        st.dataframe(pred[["pc1", "pc2", "cluster"] + list(new_df.columns)])
-
-        st.download_button(
-            "📥 Download Predictions",
-            data=pred.to_csv(index=False),
-            file_name="segment_predictions.csv",
-            mime="text/csv"
-        )
+            st.download_button(
+                "📥 Download Segmented Data",
+                df.to_csv(index=False),
+                "segmented_output.csv",
+                "text/csv",
+                use_container_width=True
+            )
+else:
+    st.info("Upload a dataset to begin.")
