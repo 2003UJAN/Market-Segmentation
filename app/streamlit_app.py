@@ -1,3 +1,13 @@
+import sys
+import os
+
+# Get project root directory
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+
+# Add project root so "src" can be imported
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
 import streamlit as st
 import pandas as pd
 from src.segmentation_pipeline import train_pipeline, load_trained_model
