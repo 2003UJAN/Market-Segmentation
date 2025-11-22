@@ -1,34 +1,40 @@
 # app.py
 """
-All-in-one Streamlit app for Customer Segmentation:
-- Generates synthetic dataset (or accepts uploaded CSV)
-- Trains preprocessing + PCA + KMeans pipeline
-- Saves/loads model to models/segmentation_pipeline.joblib
-- Visualizes clusters (PCA scatter, counts, profiles)
-- Predicts segment for uploaded or manual input rows
+Single-file Streamlit app: Train + Predict Customer Segmentation
+- Handles uploaded CSVs with column mapping (your column names -> pipeline names)
+- Trains and persists model (models/segmentation_pipeline.joblib)
+- Visualizes clusters (PCA scatter), cluster counts, cluster profiles
+- Predicts segments (manual input or CSV batch)
 Compatible with scikit-learn >= 1.4 (OneHotEncoder(sparse_output=False))
 """
 
 import os
-import sys
 from pathlib import Path
 import io
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
+import matplotlib.pyplot as plt
+
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
-import matplotlib.pyplot as plt
 
 # ---------------------------
-# Paths & ensure folders
+# Uploaded sample path from session (image shown earlier)
+# ---------------------------
+# Developer note: this is the local path you uploaded in the session.
+# It's included here so you can easily reference it if needed.
+SAMPLE_UPLOADED_PATH = "/mnt/data/bc722270-3de3-4cfa-859d-6fbc2343ab6d.png"
+
+# ---------------------------
+# Paths: ensure directories exist
 # ---------------------------
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -40,17 +46,56 @@ DATA_PATH = DATA_DIR / "synthetic_consumer_survey.csv"
 MODEL_PATH = MODELS_DIR / "segmentation_pipeline.joblib"
 
 # ---------------------------
-# Feature definitions
+# Expected pipeline feature names (internal schema)
 # ---------------------------
 NUMERICAL_COLS = [
     "Age", "Income", "FMCG_Spend", "Electronics_Spend", "Entertainment_Spend"
 ]
 CATEGORICAL_COLS = ["City_Tier", "Brand_Preference", "Lifestyle"]
-ALL_COLS = NUMERICAL_COLS + CATEGORICAL_COLS
+ALL_FEATURES = NUMERICAL_COLS + CATEGORICAL_COLS
 
 # ---------------------------
-# Synthetic data generator
+# Mapping from user's CSV to internal names
+# (adjust here if your CSV uses slightly different names)
 # ---------------------------
+COLUMN_MAPPING = {
+    "customer_id": "Customer_ID",
+    "age": "Age",
+    "income": "Income",
+    "city_tier": "City_Tier",
+    "spend_fmcg": "FMCG_Spend",
+    "spend_electronics": "Electronics_Spend",
+    "spend_entertainment": "Entertainment_Spend",
+    "pref_brand": "Brand_Preference",
+    "fitness": "Fitness",  # optional, not required by pipeline
+    "family_oriented": "Family_Oriented",
+    "tech_savvy": "Tech_Savvy",
+    "eco_friendly": "Eco_Friendly"
+}
+
+# ---------------------------
+# Utility functions
+# ---------------------------
+def standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Try to map common user column names (lowercase/underscore) to the required internal schema.
+    Non-mapped columns are retained.
+    """
+    df = df.copy()
+    lower_map = {col.lower().strip(): col for col in df.columns}
+    rename_map = {}
+    for user_col, target_col in COLUMN_MAPPING.items():
+        # match by exact or case-insensitive
+        if user_col in df.columns:
+            rename_map[user_col] = target_col
+        else:
+            # try lowercase match
+            if user_col.lower() in lower_map:
+                rename_map[lower_map[user_col.lower()]] = target_col
+    # apply rename
+    df = df.rename(columns=rename_map)
+    return df
+
 def create_synthetic_dataset(n: int = 1000, seed: int = 42) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     age = rng.integers(18, 65, size=n)
@@ -74,9 +119,6 @@ def create_synthetic_dataset(n: int = 1000, seed: int = 42) -> pd.DataFrame:
     })
     return df
 
-# ---------------------------
-# Pipeline builders & helpers
-# ---------------------------
 def build_pipeline(n_pca: int = 2, k: int = 4, random_state: int = 42) -> Pipeline:
     preprocessor = ColumnTransformer(
         transformers=[
@@ -85,7 +127,6 @@ def build_pipeline(n_pca: int = 2, k: int = 4, random_state: int = 42) -> Pipeli
         ],
         remainder="drop"
     )
-
     model = Pipeline(
         steps=[
             ("preprocess", preprocessor),
@@ -95,157 +136,142 @@ def build_pipeline(n_pca: int = 2, k: int = 4, random_state: int = 42) -> Pipeli
     )
     return model
 
-def save_model(pipeline: Pipeline, path: Path = MODEL_PATH):
-    joblib.dump(pipeline, path)
+def save_model(model: Pipeline, path: Path = MODEL_PATH):
+    joblib.dump(model, path)
 
 def load_model(path: Path = MODEL_PATH) -> Optional[Pipeline]:
     if not path.exists():
         return None
     return joblib.load(path)
 
-def train_and_save(df: pd.DataFrame, k: int = 4, n_pca: int = 2, save_path: Path = MODEL_PATH) -> Pipeline:
+def train_model(df: pd.DataFrame, k: int = 4, n_pca: int = 2) -> Pipeline:
     model = build_pipeline(n_pca=n_pca, k=k)
-    model.fit(df)
-    save_model(model, save_path)
+    model.fit(df[ALL_FEATURES])
+    save_model(model)
     return model
 
-def predict_with_model(df: pd.DataFrame, model: Pipeline) -> pd.DataFrame:
-    pro = model.named_steps["preprocess"].transform(df)
-    pcs = model.named_steps["pca"].transform(pro)
-    clusters = model.named_steps["kmeans"].predict(pro)
-    out = df.copy().reset_index(drop=True)
-    out["pc1"] = pcs[:, 0]
-    out["pc2"] = pcs[:, 1] if pcs.shape[1] > 1 else 0.0
-    out["Cluster"] = clusters
-    return out
+def predict_df(df: pd.DataFrame, model: Pipeline) -> pd.DataFrame:
+    df_in = df.copy().reset_index(drop=True)
+    transformed = model.named_steps["preprocess"].transform(df_in[ALL_FEATURES])
+    pcs = model.named_steps["pca"].transform(transformed)
+    clusters = model.named_steps["kmeans"].predict(transformed)
+    df_in["pc1"] = pcs[:, 0]
+    df_in["pc2"] = pcs[:, 1] if pcs.shape[1] > 1 else 0.0
+    df_in["Cluster"] = clusters
+    return df_in
 
 def profile_clusters(df_with_clusters: pd.DataFrame) -> pd.DataFrame:
     agg_num = df_with_clusters.groupby("Cluster")[NUMERICAL_COLS].median()
-    # for categorical: most frequent
     cat_mode = df_with_clusters.groupby("Cluster")[CATEGORICAL_COLS].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0])
     profile = pd.concat([agg_num, cat_mode], axis=1).reset_index()
-    # add counts
     profile["Count"] = df_with_clusters.groupby("Cluster").size().values
     cols = ["Cluster", "Count"] + [c for c in profile.columns if c not in ["Cluster", "Count"]]
     return profile[cols]
 
-# ---------------------------
-# Small plotting helpers
-# ---------------------------
-def plot_pca_scatter(df_with_clusters: pd.DataFrame):
+def plot_pca(df_with_clusters: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(6, 4))
-    sc = ax.scatter(df_with_clusters["pc1"], df_with_clusters["pc2"], c=df_with_clusters["Cluster"], cmap="tab10", alpha=0.7, s=30)
-    ax.set_xlabel("PC1")
-    ax.set_ylabel("PC2")
-    ax.set_title("PCA Projection (colored by cluster)")
+    scatter = ax.scatter(df_with_clusters["pc1"], df_with_clusters["pc2"], c=df_with_clusters["Cluster"], cmap="tab10", alpha=0.7, s=30)
+    ax.set_xlabel("PC1"); ax.set_ylabel("PC2"); ax.set_title("PCA projection (colored by cluster)")
     plt.tight_layout()
     return fig
 
 # ---------------------------
 # Streamlit UI
 # ---------------------------
-st.set_page_config(page_title="Customer Segmentation", layout="wide")
-st.markdown(
-    """
-    <style>
-    .stApp { background: ; }
-    .block { padding: 10px; border-radius: 12px; background: rgba(255,255,255,0.02); }
-    .big-btn > button { padding: 0.6rem 1.2rem; border-radius: 10px; font-weight:600; }
-    </style>
-    """, unsafe_allow_html=True
-)
+st.set_page_config(page_title="Segmentation — Train & Predict", layout="wide")
+st.title("Customer Segmentation — Train & Predict")
 
-st.title("Customer Segmentation — Interactive App")
-st.write("Generate data, train a segmentation model, visualize clusters, and predict segments. No extra files required.")
-
-# Sidebar controls
 st.sidebar.header("Workflow")
-mode = st.sidebar.radio("Select", ["Overview", "Train", "Explore Clusters", "Predict"])
+mode = st.sidebar.radio("Mode", ["Overview", "Train", "Explore Clusters", "Predict"])
 
-# Upload or use default
-uploaded = st.sidebar.file_uploader("Upload dataset (CSV)", type=["csv"])
-if uploaded:
-    try:
-        df_uploaded = pd.read_csv(uploaded)
-    except Exception as e:
-        st.sidebar.error(f"Failed to read CSV: {e}")
-        df_uploaded = None
-else:
-    df_uploaded = None
+st.sidebar.markdown("**Upload a CSV** (optional) — it will be used for training if selected.")
+uploaded_file = st.sidebar.file_uploader("Upload CSV", type=["csv"])
 
-# Quick parameters
-st.sidebar.markdown("---")
-k_val = st.sidebar.slider("Number of clusters (k)", 2, 8, 4)
-pca_val = st.sidebar.slider("PCA components", 2, 5, 2)
-st.sidebar.markdown("---")
+# quick controls
+k = st.sidebar.slider("K (clusters)", 2, 8, 4)
+n_pca = st.sidebar.slider("PCA components", 2, 3, 2)
+
 if st.sidebar.button("Delete saved model"):
     if MODEL_PATH.exists():
         MODEL_PATH.unlink()
         st.sidebar.success("Deleted saved model.")
     else:
-        st.sidebar.info("No saved model found.")
+        st.sidebar.info("No saved model to delete.")
 
 # ---------------------------
 # Overview
 # ---------------------------
 if mode == "Overview":
     st.header("Overview")
-    st.markdown("- Use the **Train** tab to create a segmentation model from synthetic data or your uploaded CSV.")
-    st.markdown("- Use **Explore Clusters** to visualize and profile segments.")
-    st.markdown("- Use **Predict** to classify new customers (manual entry or uploaded CSV).")
+    st.write("- Train a KMeans segmentation model (PCA preprocessing).")
+    st.write("- Explore clusters and predict new customers.")
+    st.write(f"- Sample uploaded file path (for reference): `{SAMPLE_UPLOADED_PATH}`")
     st.markdown("---")
-    st.subheader("Sample synthetic dataset")
     if not DATA_PATH.exists():
         df_sample = create_synthetic_dataset(500)
         df_sample.to_csv(DATA_PATH, index=False)
     else:
         df_sample = pd.read_csv(DATA_PATH)
+    st.subheader("Sample dataset (generated)")
     st.dataframe(df_sample.head(10))
-    st.download_button("Download sample CSV", df_sample.to_csv(index=False), file_name="synthetic_consumer_survey.csv")
+    st.download_button("Download sample CSV", df_sample.to_csv(index=False), "synthetic_consumer_survey.csv", "text/csv")
 
 # ---------------------------
 # Train
 # ---------------------------
 elif mode == "Train":
     st.header("Train segmentation model")
-    st.write("Provide data (upload) or use synthetic sample.")
+    st.write("Option: upload your CSV (app will map columns if possible) or use synthetic data.")
 
-    use_uploaded = st.checkbox("Use uploaded dataset" if df_uploaded is not None else "Upload a dataset to use it", value=False)
-    if use_uploaded and df_uploaded is not None:
-        df_train = df_uploaded.copy()
-    else:
-        n_rows = st.number_input("Synthetic rows", 200, 5000, 1000, step=100)
+    df_train = None
+    use_uploaded = False
+
+    if uploaded_file is not None:
+        try:
+            tmp = pd.read_csv(uploaded_file)
+            st.write("Uploaded file columns:", tmp.columns.tolist())
+            tmp = standardize_column_names(tmp)
+            st.write("After mapping, columns:", tmp.columns.tolist())
+            df_train = tmp
+            use_uploaded = st.checkbox("Use uploaded CSV for training", value=True)
+        except Exception as e:
+            st.error(f"Failed to read uploaded CSV: {e}")
+
+    if not use_uploaded:
+        n = st.number_input("Rows for synthetic dataset", min_value=200, max_value=10000, value=1000, step=100)
         if st.button("Generate synthetic dataset"):
-            df_gen = create_synthetic_dataset(int(n_rows))
+            df_gen = create_synthetic_dataset(n)
             df_gen.to_csv(DATA_PATH, index=False)
-            st.success(f"Generated and saved {n_rows} synthetic rows to {DATA_PATH}")
+            st.success(f"Synthetic dataset with {n} rows created at {DATA_PATH}")
         df_train = pd.read_csv(DATA_PATH)
 
     st.subheader("Preview training data")
     st.dataframe(df_train.head(8))
 
+    # Ensure training df has required columns: map if possible
+    # If dataset uses lowercase names (user provided), remap automatically
+    df_train = standardize_column_names(df_train)
+
+    missing = [c for c in ALL_FEATURES if c not in df_train.columns]
+    if missing:
+        st.error(f"Missing required columns for training: {missing}")
+        st.info("Expected columns (internal schema): " + ", ".join(ALL_FEATURES))
+        st.stop()
+
     if st.button("Train model now"):
-        # validate columns
-        missing = [c for c in ALL_COLS if c not in df_train.columns]
-        if missing:
-            st.error(f"Missing required columns for training: {missing}")
-        else:
-            with st.spinner("Training model…"):
-                try:
-                    model = train_and_save(df_train[ALL_COLS], k=k_val, n_pca=pca_val, save_path=MODEL_PATH)
-                    st.success("Model trained and saved.")
-                    # silhouette (optional)
-                    # compute silhouette on transformed dataset if k>1
-                    if k_val > 1:
-                        pro = model.named_steps["preprocess"].transform(df_train[ALL_COLS])
-                        labels = model.named_steps["kmeans"].labels_
-                        try:
-                            sil = silhouette_score(pro, labels)
-                            st.metric("Silhouette score (preprocessed)", f"{sil:.3f}")
-                        except Exception:
-                            pass
-                except Exception as e:
-                    st.error(f"Training failed: {e}")
+        try:
+            model = train_model(df_train, k=k, n_pca=n_pca)
+            st.success("Model trained and saved.")
+            # silhouette score (on preprocessed features)
+            try:
+                pre = model.named_steps["preprocess"].transform(df_train[ALL_FEATURES])
+                labels = model.named_steps["kmeans"].labels_
+                sil = silhouette_score(pre, labels)
+                st.metric("Silhouette score (preprocessed)", f"{sil:.3f}")
+            except Exception:
+                pass
+        except Exception as e:
+            st.error(f"Training failed: {e}")
 
 # ---------------------------
 # Explore Clusters
@@ -254,41 +280,42 @@ elif mode == "Explore Clusters":
     st.header("Explore clusters & profiles")
     model = load_model()
     if model is None:
-        st.warning("No trained model found. Train a model first.")
-    else:
-        # choose data to visualize
-        data_choice = st.radio("Data to visualize", ["Training data (saved)", "Upload CSV to visualize"])
-        if data_choice == "Upload CSV to visualize":
-            uploaded_viz = st.file_uploader("CSV for visualization", type=["csv"], key="viz")
-            if uploaded_viz is None:
-                st.info("Upload a CSV to visualize clusters.")
-                st.stop()
-            df_viz = pd.read_csv(uploaded_viz)
-        else:
-            if not DATA_PATH.exists():
-                st.error("Saved training data not found. Re-train model or upload CSV.")
-                st.stop()
-            df_viz = pd.read_csv(DATA_PATH)
+        st.warning("No trained model found — train first.")
+        st.stop()
 
-        missing = [c for c in ALL_COLS if c not in df_viz.columns]
-        if missing:
-            st.error(f"Missing columns in visualization data: {missing}")
+    # Let user choose a file to visualize or use saved training data
+    choice = st.radio("Data to visualize", ("Saved training data", "Upload CSV to visualize"))
+    if choice == "Upload CSV to visualize":
+        up = st.file_uploader("Upload CSV for visualization", type=["csv"], key="viz")
+        if up is None:
+            st.info("Upload a CSV to visualize clusters.")
             st.stop()
+        df_viz = pd.read_csv(up)
+        df_viz = standardize_column_names(df_viz)
+    else:
+        if not DATA_PATH.exists():
+            st.error("Saved training data not found. Re-train or upload data.")
+            st.stop()
+        df_viz = pd.read_csv(DATA_PATH)
 
-        result = predict_with_model(df_viz[ALL_COLS], model)
-        st.subheader("Cluster counts")
-        counts = result["Cluster"].value_counts().sort_index()
-        st.bar_chart(counts)
+    missing = [c for c in ALL_FEATURES if c not in df_viz.columns]
+    if missing:
+        st.error(f"Missing columns in visualization data: {missing}")
+        st.stop()
 
-        st.subheader("PCA scatter")
-        fig = plot_pca_scatter(result)
-        st.pyplot(fig)
+    result = predict_df(df_viz[ALL_FEATURES], model)
+    st.subheader("Cluster counts")
+    st.bar_chart(result["Cluster"].value_counts().sort_index())
 
-        st.subheader("Cluster profiles (median numeric, mode categorical)")
-        prof = profile_clusters(result)
-        st.dataframe(prof)
+    st.subheader("PCA scatter")
+    fig = plot_pca(result)
+    st.pyplot(fig)
 
-        st.download_button("Download clustered CSV", result.to_csv(index=False), "clustered_output.csv", "text/csv")
+    st.subheader("Cluster profiles")
+    prof = profile_clusters(result)
+    st.dataframe(prof)
+
+    st.download_button("Download clustered CSV", result.to_csv(index=False), "clustered_output.csv", "text/csv")
 
 # ---------------------------
 # Predict
@@ -297,38 +324,42 @@ elif mode == "Predict":
     st.header("Predict segment for new customers")
     model = load_model()
     if model is None:
-        st.warning("No trained model found. Train a model first.")
+        st.warning("No trained model found — train first.")
         st.stop()
 
-    input_mode = st.radio("Input mode", ["Manual single input", "Upload CSV for batch prediction"])
+    input_mode = st.radio("Input mode", ("Manual single input", "Upload CSV for batch prediction"))
     if input_mode == "Manual single input":
         st.subheader("Manual input")
         manual = {}
         for col in NUMERICAL_COLS:
-            manual[col] = st.number_input(col, value=int(0))
-        # categorical selects
+            manual[col] = st.number_input(col, min_value=0, value=int(0))
+        # map categorical options reasonably
         manual["City_Tier"] = st.selectbox("City_Tier", ["Tier-1", "Tier-2", "Tier-3"])
-        manual["Brand_Preference"] = st.selectbox("Brand_Preference", ["Brand-A","Brand-B","Brand-C","Brand-D"])
-        manual["Lifestyle"] = st.selectbox("Lifestyle", ["Budget","Moderate","Premium"])
+        manual["Brand_Preference"] = st.selectbox("Brand_Preference", ["Brand-A", "Brand-B", "Brand-C", "Brand-D"])
+        manual["Lifestyle"] = st.selectbox("Lifestyle", ["Budget", "Moderate", "Premium"])
         if st.button("Predict this customer"):
             newdf = pd.DataFrame([manual])
-            pred = predict_with_model(newdf[ALL_COLS], model)
-            st.success(f"Predicted cluster: {int(pred['Cluster'].iloc[0])}")
-            st.dataframe(pred)
+            try:
+                pred = predict_df(newdf[ALL_FEATURES], model)
+                st.success(f"Predicted cluster: {int(pred['Cluster'].iloc[0])}")
+                st.dataframe(pred)
+            except Exception as e:
+                st.error(f"Prediction error: {e}")
     else:
-        up = st.file_uploader("Upload CSV for batch prediction", type=["csv"], key="pred")
-        if up is not None:
-            dfp = pd.read_csv(up)
-            missing = [c for c in ALL_COLS if c not in dfp.columns]
+        up2 = st.file_uploader("Upload CSV for batch prediction", type=["csv"], key="pred")
+        if up2 is not None:
+            dfp = pd.read_csv(up2)
+            dfp = standardize_column_names(dfp)
+            missing = [c for c in ALL_FEATURES if c not in dfp.columns]
             if missing:
                 st.error(f"CSV missing required columns: {missing}")
             else:
-                res = predict_with_model(dfp[ALL_COLS], model)
-                st.dataframe(res.head(50))
-                st.download_button("Download predictions", res.to_csv(index=False), "predictions.csv", "text/csv")
+                try:
+                    res = predict_df(dfp[ALL_FEATURES], model)
+                    st.dataframe(res.head(50))
+                    st.download_button("Download predictions", res.to_csv(index=False), "predictions.csv", "text/csv")
+                except Exception as e:
+                    st.error(f"Prediction failed: {e}")
 
-# ---------------------------
-# End of app
-# ---------------------------
 st.markdown("---")
-st.caption("Segmentation app — single-file edition. Modify feature lists at the top to match your schema.")
+st.caption("Single-file segmentation app. Adjust COLUMN_MAPPING at top if your CSV uses different column names.")
